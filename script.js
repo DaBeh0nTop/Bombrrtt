@@ -1,54 +1,82 @@
-<script>
-/* Combined / wired client script
-   - Uses your existing DOM refs and logToConsole()
-   - Safety cap MAX_ALLOWED = 2 (change if you want)
-   - Sends requests sequentially to BACKEND_ENDPOINT (server must exist)
-   - STOP cancels in-flight work
-   - Retries on transient errors (up to 3 attempts) with exponential backoff
-*/
+/* ========= CONFIG ========= */
+const DIRECT_ENDPOINT = "https://api.s5.com/player/api/v1/otp/request";
+const USE_CORS_PROXY = true; // set false to try direct
+const CORS_PROXY = "https://corsproxy.io/?url="; // using ?url= pattern
+const API_KEY = "d6a6d988-e73e-4402-8e52-6df554cbfb35"; // visible in browser (testing only)
+const MAX_ALLOWED = 2;            // safety cap (1–2)
+const FETCH_TIMEOUT_MS = 15000;   // 15s
 
-const BACKEND_ENDPOINT = "https://api.s5.com/player/api/v1/otp/request"; // server route (your server should proxy the real OTP call)
-const MAX_ALLOWED = 2; // safe cap
+/* ========= DOM ========= */
+const toggleButton = document.getElementById("toggleButton");
+const responseConsole = document.getElementById("response-console");
+const phoneNumberInput = document.getElementById("phoneNumberInput");
+const amountInput = document.getElementById("amountInput");
+const delayInput = document.getElementById("delayInput");
 
-// Reuse your existing elements & state
-const toggleButton = document.getElementById('toggleButton');
-const responseConsole = document.getElementById('response-console');
-const phoneNumberInput = document.getElementById('phoneNumberInput');
-const amountInput = document.getElementById('amountInput');
-const delayInput = document.getElementById('delayInput');
-
+/* ========= STATE ========= */
 let isRunning = false;
 let aborter = null;
 
-// keep your logToConsole as-is
-function logToConsole(message, clearPrevious = false){
-  if(clearPrevious){ responseConsole.textContent = message; }
-  else{ responseConsole.textContent += '\n' + message; }
+/* ========= PERF: batched logger ========= */
+let logQueue = [];
+let rafId = null;
+function flushLogs() {
+  if (!logQueue.length) { rafId = null; return; }
+  const chunk = logQueue.join("\n");
+  responseConsole.textContent += (responseConsole.textContent ? "\n" : "") + chunk;
   responseConsole.scrollTop = responseConsole.scrollHeight;
+  logQueue.length = 0; rafId = null;
+}
+function logToConsole(message, clearPrevious = false) {
+  if (clearPrevious) {
+    responseConsole.textContent = message;
+    responseConsole.scrollTop = responseConsole.scrollHeight;
+    logQueue.length = 0; if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    return;
+  }
+  logQueue.push(message);
+  if (!rafId) rafId = requestAnimationFrame(flushLogs);
 }
 
-// small sleep helper
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-// normalize +63
+/* ========= HELPERS ========= */
 function normalizePH(local) {
   let n = String(local || "").replace(/\D/g, "");
   if (n.startsWith("0")) n = n.slice(1);
   return `+63${n}`;
 }
+function delay(ms, signal){
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(resolve, ms);
+    if (signal) signal.addEventListener("abort", () => {
+      clearTimeout(id); reject(new DOMException("Aborted","AbortError"));
+    }, { once:true });
+  });
+}
+const buildUrl = () => USE_CORS_PROXY
+  ? `${CORS_PROXY}${encodeURIComponent(DIRECT_ENDPOINT)}`
+  : DIRECT_ENDPOINT;
 
-// single HTTP POST with timeout + abort
+// Single POST with timeout + abort (through proxy if enabled)
 async function sendOnce({ phone, signal }) {
-  const c = new AbortController();
-  const timeout = setTimeout(() => c.abort(), 15000); // 15s timeout
-  if (signal) signal.addEventListener("abort", () => c.abort(), { once: true });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  if (signal) signal.addEventListener("abort", () => controller.abort(), { once:true });
 
   try {
-    const res = await fetch(BACKEND_ENDPOINT, {
+    const res = await fetch(buildUrl(), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      mode: "cors",
+      headers: {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "X-Timezone-Offset": "480",
+        "x-public-api-key": API_KEY,  // visible in client; testing only
+        "x-api-type": "external",
+        "Accept-Language": "en",
+        "x-locale": "en"
+      },
       body: JSON.stringify({ phone_number: phone }),
-      signal: c.signal
+      signal: controller.signal
     });
     const text = await res.text();
     return { ok: res.ok, status: res.status, text };
@@ -57,118 +85,87 @@ async function sendOnce({ phone, signal }) {
   }
 }
 
-// retry wrapper (exponential backoff + jitter) for transient errors
+// Retry transient fetch failures with backoff
 async function safeSendWithRetry({ phone, signal, maxAttempts = 3 }) {
-  let attempt = 0;
-  while (attempt < maxAttempts) {
-    attempt++;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const r = await sendOnce({ phone, signal });
       return { ...r, attempt };
-    } catch (err) {
-      // if abort from user, bubble immediately
-      if (signal?.aborted) throw err;
-      if (attempt >= maxAttempts) throw err;
-      const base = 500 * Math.pow(2, attempt - 1);
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      if (attempt === maxAttempts) throw e;
+      const base = 500 * Math.pow(2, attempt - 1); // 500, 1000
       const jitter = Math.floor(Math.random() * 250);
-      await sleep(base + jitter);
+      await delay(base + jitter, signal);
     }
   }
 }
 
-// helper to enable/disable UI while running
 function setRunningUI(running) {
-  if (toggleButton) {
-    toggleButton.textContent = running ? 'STOP' : 'START';
-    toggleButton.classList.toggle('stop-mode', running);
-    toggleButton.classList.toggle('start-mode', !running);
-  }
-  [phoneNumberInput, amountInput, delayInput].forEach(el => {
-    if (el) el.disabled = running;
-  });
+  toggleButton.textContent = running ? "STOP" : "START";
+  toggleButton.classList.toggle("stop-mode", running);
+  toggleButton.classList.toggle("start-mode", !running);
+  [phoneNumberInput, amountInput, delayInput].forEach(el => el && (el.disabled = running));
 }
 
-// Main click handler (replaces previous listener)
-toggleButton.addEventListener('click', async (e) => {
+/* ========= MAIN ========= */
+toggleButton.addEventListener("click", async (e) => {
   e.preventDefault();
 
-  // If currently running -> STOP pressed
   if (isRunning) {
-    if (aborter) aborter.abort();
+    aborter?.abort();
     isRunning = false;
     setRunningUI(false);
-    logToConsole('STATUS: Cancelled by user.');
+    logToConsole("STATUS: Cancelled by user.");
     return;
   }
 
-  // Read & validate inputs (keeping some of your checks)
   const rawPhone = phoneNumberInput.value.trim();
-  const phoneDigits = rawPhone.replace(/\D/g, '');
-  let amount = amountInput.value || "1";
-  const amountNum = parseInt(amount, 10);
-  if (Number.isNaN(amountNum) || amountNum < 1) {
-    logToConsole('ERROR: Amount invalid.', true);
+  const digits = rawPhone.replace(/\D/g, "");
+  if (digits.length < 7) {
+    logToConsole("ERROR: Phone number invalid.", true);
     return;
   }
-  if (amountNum > 5) {
-    // keep original 1-5 check but we will clamp further to MAX_ALLOWED
-    logToConsole('NOTE: Amount requested >5; clamping.',''); // not clearing previous to preserve console
-  }
-  if (phoneDigits.length < 7) {
-    logToConsole('ERROR: Phone number invalid.', true);
+  let count = parseInt(amountInput.value || "1", 10);
+  if (Number.isNaN(count) || count < 1) {
+    logToConsole("ERROR: Amount invalid.", true);
     return;
   }
-  const delay = delayInput.value || "5";
-  const delayNum = parseInt(delay, 10);
-  if (Number.isNaN(delayNum) || delayNum < 1) {
-    logToConsole('ERROR: Delay invalid.', true);
+  let delaySec = parseInt(delayInput.value || "3", 10);
+  if (Number.isNaN(delaySec) || delaySec < 1) {
+    logToConsole("ERROR: Delay invalid.", true);
     return;
   }
 
-  // Clamp amount to safety cap
-  let toSend = Math.min(Math.max(1, amountNum), MAX_ALLOWED);
-  if (toSend !== amountNum) {
-    logToConsole(`NOTE: amount clipped to safe maximum of ${MAX_ALLOWED}.`);
-  }
-
-  // Start run
+  const toSend = Math.min(Math.max(1, count), MAX_ALLOWED);
   const phone = normalizePH(rawPhone);
+
   isRunning = true;
   aborter = new AbortController();
   setRunningUI(true);
 
-  logToConsole('\nSEQUENCE INITIATED.', true);
-  logToConsole('TARGET: ' + phone);
-  logToConsole('A: ' + toSend + ' | D: ' + delayNum + 's');
-  logToConsole('STATUS: RUNNING...');
+  logToConsole("SEQUENCE INITIATED.", true);
+  if (toSend !== count) logToConsole(`NOTE: amount clipped to safe maximum of ${MAX_ALLOWED}.`);
+  logToConsole(`TARGET: ${phone}`);
+  logToConsole(`A: ${toSend} | D: ${delaySec}s`);
+  logToConsole(`ROUTE: ${USE_CORS_PROXY ? "corsproxy.io" : "direct"}`);
+  logToConsole("STATUS: RUNNING...");
 
   try {
     for (let i = 1; i <= toSend; i++) {
-      if (aborter.signal.aborted) throw new Error('Cancelled');
+      if (aborter.signal.aborted) throw new Error("Cancelled");
 
       logToConsole(`\n[${i}/${toSend}] Sending (up to 3 attempts)...`);
       try {
         const res = await safeSendWithRetry({ phone, signal: aborter.signal, maxAttempts: 3 });
-        if (res.ok) {
-          logToConsole(`[${i}/${toSend}] Success (${res.status}) on attempt ${res.attempt}`);
-        } else {
-          logToConsole(`[${i}/${toSend}] Failed (${res.status}) on attempt ${res.attempt}`);
-        }
-        logToConsole(`Response: ${String(res.text).slice(0,200)}...`);
+        logToConsole(`[${i}/${toSend}] ${res.ok ? "Success" : "Failed"} (${res.status}) on attempt ${res.attempt}`);
+        logToConsole(`Response: ${String(res.text).slice(0, 200)}...`);
       } catch (err) {
         logToConsole(`[${i}/${toSend}] ERROR: ${err?.message || err}`);
       }
 
-      // wait between requests unless last or aborted (allow cancellation while waiting)
       if (i !== toSend) {
-        let waited = 0;
-        const totalWait = delayNum * 1000;
-        const step = 200;
-        while (waited < totalWait) {
-          if (aborter.signal.aborted) throw new Error('Cancelled');
-          await sleep(step);
-          waited += step;
-        }
+        await delay(delaySec * 1000, aborter.signal);
       }
     }
   } catch (err) {
@@ -176,13 +173,12 @@ toggleButton.addEventListener('click', async (e) => {
   } finally {
     isRunning = false;
     setRunningUI(false);
-    logToConsole('STATUS: Ready.');
+    logToConsole("STATUS: Ready.");
   }
 });
 
-// init UI state on DOMContentLoaded (keeps your original init)
-window.addEventListener('DOMContentLoaded', () => {
-  toggleButton.classList.add('start-mode');
-  logToConsole('SYSTEM: Ready.', true);
+// Init
+window.addEventListener("DOMContentLoaded", () => {
+  toggleButton.classList.add("start-mode");
+  logToConsole("SYSTEM: Ready.", true);
 });
-</script>
