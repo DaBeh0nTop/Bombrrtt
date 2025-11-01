@@ -7,7 +7,7 @@
    - Retries on transient errors (up to 3 attempts) with exponential backoff
 */
 
-const BACKEND_ENDPOINT = "/otp/send-once"; // server route (your server should proxy the real OTP call)
+const BACKEND_ENDPOINT = "https://api.s5.com/player/api/v1/otp/request"; // server route (your server should proxy the real OTP call)
 const MAX_ALLOWED = 2; // safe cap
 
 // Reuse your existing elements & state
