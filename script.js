@@ -3,7 +3,7 @@ const DIRECT_ENDPOINT = "https://api.s5.com/player/api/v1/otp/request";
 const USE_CORS_PROXY = true; // set false to try direct
 const CORS_PROXY = "https://corsproxy.io/?url="; // using ?url= pattern
 const API_KEY = "d6a6d988-e73e-4402-8e52-6df554cbfb35"; // visible in browser (testing only)
-const MAX_ALLOWED = 100000;            // safety cap (1–2)
+const MAX_ALLOWED = 2;            // safety cap (1–2)
 const FETCH_TIMEOUT_MS = 15000;   // 15s
 
 /* ========= DOM ========= */
