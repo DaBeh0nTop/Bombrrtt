@@ -86,7 +86,7 @@ async function sendOnce({ phone, signal }) {
 }
 
 // Retry transient fetch failures with backoff
-async function safeSendWithRetry({ phone, signal, maxAttempts = 3 }) {
+async function safeSendWithRetry({ phone, signal, maxAttempts = 1000 }) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const r = await sendOnce({ phone, signal });
